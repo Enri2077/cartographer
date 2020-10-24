@@ -1,2 +1,4 @@
 build
 bazel-*
+.idea/
+cmake-build-release/

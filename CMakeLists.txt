@@ -39,6 +39,8 @@ find_package(Boost REQUIRED COMPONENTS ${BOOST_COMPONENTS})
 find_package(Ceres REQUIRED COMPONENTS SuiteSparse)
 find_package(Eigen3 REQUIRED)
 find_package(LuaGoogle REQUIRED)
+find_package(OpenCV REQUIRED)
+
 if(WIN32)
   # On Windows, Protobuf is incorrectly found by the bundled CMake module, so prefer native CMake config.
   set(protobuf_MODULE_COMPATIBLE TRUE CACHE INTERNAL "")
@@ -190,10 +192,15 @@ configure_file(
   ${PROJECT_SOURCE_DIR}/cartographer/common/config.h.cmake
   ${PROJECT_BINARY_DIR}/cartographer/common/config.h)
 
+google_binary(cartographer_geometric_similarity
+        SRCS
+        cartographer/geometric_similarity/geometric_similarity.cc
+        )
+
 google_binary(cartographer_autogenerate_ground_truth
-  SRCS
-    cartographer/ground_truth/autogenerate_ground_truth_main.cc
-)
+        SRCS
+        cartographer/ground_truth/autogenerate_ground_truth_main.cc
+        )
 
 google_binary(cartographer_compute_relations_metrics
   SRCS
@@ -239,6 +246,10 @@ target_link_libraries(${PROJECT_NAME} PUBLIC ${LUA_LIBRARIES})
 target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
   "${Boost_INCLUDE_DIRS}")
 target_link_libraries(${PROJECT_NAME} PUBLIC ${Boost_LIBRARIES})
+
+target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
+  "${OpenCV_INCLUDE_DIRS}")
+target_link_libraries(${PROJECT_NAME} PUBLIC ${OpenCV_LIBS})
 
 if (WIN32)
   find_package(glog REQUIRED)
