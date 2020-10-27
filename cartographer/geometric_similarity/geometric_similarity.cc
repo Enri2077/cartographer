@@ -1,6 +1,12 @@
 #include <chrono>
 #include <iostream>
 #include "cartographer/mapping/internal/2d/scan_matching/real_time_correlative_scan_matcher_2d.h"
+#include <string>
+#include <fstream>
+
+#include <opencv2/imgcodecs.hpp>
+#include <cv.hpp>
+#include <iomanip>
 
 #include "cartographer/mapping/proto/scan_matching/real_time_correlative_scan_matcher_options.pb.h"
 #include "Eigen/Geometry"
@@ -13,173 +19,429 @@
 #include "cartographer/mapping/2d/tsdf_2d.h"
 #include "cartographer/mapping/2d/tsdf_range_data_inserter_2d.h"
 #include "cartographer/io/image.h"
-#include <opencv2/imgcodecs.hpp>
-#include <cv.hpp>
 
 using namespace cv;
 using namespace std;
 using namespace cartographer::mapping;
 
+Vec3b colorMap(uint8_t in, string palette) {
+    if (palette == "black,blue,green,red") {
+        uint8_t intensity_min = 0;
+        uint8_t intensity_1 = 85;
+        uint8_t intensity_2 = 170;
+        uint8_t intensity_max = 255;
+        Vec3b color;
+        if (in < intensity_1) {
+            uint8_t start = intensity_min, end = intensity_1;
+            uint8_t x = intensity_max * (double) (in - start) / (end - start);
+            color[0] = x;  // B
+            color[1] = 0;  // G
+            color[2] = 0;  // R
+            return color;
+        } else if (in < intensity_2) {
+            uint8_t start = intensity_1, end = intensity_2;
+            uint8_t x = intensity_max * (double) (in - start) / (end - start);
+            color[0] = 255 - x;  // B
+            color[1] = x;  // G
+            color[2] = 0;  // R
+            return color;
+        } else {
+            uint8_t start = intensity_2, end = intensity_max;
+            uint8_t x = intensity_max * (double) (in - start) / (end - start);
+            color[0] = 0;  // B
+            color[1] = 255 - x;  // G
+            color[2] = x;  // R
+            return color;
+        }
+    } else if (palette == "black,blue,green") {
+        uint8_t intensity_min = 0;
+        uint8_t intensity_1 = 128;
+        uint8_t intensity_max = 255;
+        Vec3b color;
+        if (in < intensity_1) {
+            uint8_t start = intensity_min, end = intensity_1;
+            uint8_t x = intensity_max * (double) (in - start) / (end - start);
+            color[0] = x;  // B
+            color[1] = 0;  // G
+            color[2] = 0;  // R
+            return color;
+        } else {
+            uint8_t start = intensity_1, end = intensity_max;
+            uint8_t x = intensity_max * (double) (in - start) / (end - start);
+            color[0] = 255 - x;  // B
+            color[1] = x;  // G
+            color[2] = 0;  // R
+            return color;
+        }
+    } else if (palette == "black,blue,yellow") {
+        uint8_t intensity_min = 0;
+        uint8_t intensity_1 = 128;
+        uint8_t intensity_max = 255;
+        Vec3b color;
+        if (in < intensity_1) {
+            uint8_t start = intensity_min, end = intensity_1;
+            uint8_t x = intensity_max * (double) (in - start) / (end - start);
+            color[0] = x;  // B
+            color[1] = 0;  // G
+            color[2] = 0;  // R
+            return color;
+        } else {
+            uint8_t start = intensity_1, end = intensity_max;
+            uint8_t x = intensity_max * (double) (in - start) / (end - start);
+            color[0] = 255 - x;  // B
+            color[1] = x;  // G
+            color[2] = x;  // R
+            return color;
+        }
+    } else {
+        Vec3b color;
+        color[0] = in;  // B
+        color[1] = in;  // G
+        color[2] = in;  // R
+        return color;
+    }
+}
+
+
+void insert_ranges_to_point_cloud(cartographer::sensor::PointCloud &cloud_out, vector<double> ranges_in, double angle_min, double angle_increment, double range_min, double range_max) {
+    size_t n_pts = ranges_in.size();
+    Eigen::ArrayXXf ranges(n_pts, 2);
+    Eigen::ArrayXXf output(n_pts, 2);
+
+    // Get the ranges into Eigen format
+    for (size_t i = 0; i < n_pts; ++i) {
+        ranges(i, 0) = (double) ranges_in[i];
+        ranges(i, 1) = (double) ranges_in[i];
+    }
+
+    // Spherical->Cartesian projection
+    Eigen::ArrayXXf co_sine_map_;
+    co_sine_map_ = Eigen::ArrayXXf(n_pts, 2);
+    for (size_t i = 0; i < n_pts; ++i) {
+        co_sine_map_(i, 0) = cos(angle_min + (double) i * angle_increment);
+        co_sine_map_(i, 1) = sin(angle_min + (double) i * angle_increment);
+    }
+
+    output = ranges * co_sine_map_;
+
+    for (size_t i = 0; i < n_pts; ++i) {
+        if (ranges_in[i] < range_max && ranges_in[i] >= range_min) {
+            cloud_out.push_back({Eigen::Vector3f{output(i, 0), output(i, 1), 0.0}});
+        }
+    }
+}
+
+
 int main() {
 
-    bool use_tsdf = true;
+    string grid_source_ = "probability_grid_from_ranges"; // map, probability_grid_from_ranges, tsdf_from_ranges;
+    bool apply_gaussian_blur = true;
+    string palette_str = "black,blue,green,red"; // "black,blue,yellow";
+
+    string point_clouds_source = "run_scans"; // olson, fake_corridor, run_scans
+    double probability_grid_res_ = 0.025;
 
     auto make_grid_t_start = chrono::high_resolution_clock::now();
 
     // Scan
-    cartographer::sensor::PointCloud point_cloud_;
-    auto left_wall = Eigen::Vector3f{-1.0, 0.0, 0.0};
-    auto right_wall = Eigen::Vector3f{1.0, 0.0, 0.0};
-    auto wall = Eigen::Vector3f{0.0, 1.0, 0.0};
-    int num_wall_points = 100;
-    for (int i = 0; i < num_wall_points; i++) {
-        point_cloud_.push_back({left_wall + wall / num_wall_points * i});
-        point_cloud_.push_back({right_wall + wall / num_wall_points * i});
+    vector<cartographer::sensor::PointCloud> point_clouds;
+    Mat grid_image_mat;
+    int grid_image_w;
+    int grid_image_h;
+    double grid_image_res;
+    double range_max_ = 0.0;
+
+    if (point_clouds_source == "fake_corridor") {
+        cartographer::sensor::PointCloud point_cloud;
+        auto left_wall = Eigen::Vector3f{-1.0, 0.0, 0.0};
+        auto right_wall = Eigen::Vector3f{1.0, 0.0, 0.0};
+        auto wall = Eigen::Vector3f{0.0, 30.0, 0.0};
+        int num_wall_points = 30.0 / 0.05;
+        for (int i = 0; i < num_wall_points; i++) {
+            point_cloud.push_back({left_wall + wall / num_wall_points * i});
+        }
+        for (int i = 0; i < num_wall_points; i++) {
+            if (i < num_wall_points / 2 - 15 || i > num_wall_points / 2 + 15) point_cloud.push_back({right_wall + wall / num_wall_points * i});
+        }
     }
 
-    // Probability grid (from scan itself)
-    unique_ptr<Grid2D> grid_;
-    ValueConversionTables conversion_tables_;
-    unique_ptr<RangeDataInserterInterface> range_data_inserter_;
-    if (use_tsdf) {
-        grid_ = absl::make_unique<TSDF2D>(MapLimits(0.05, Eigen::Vector2d(0.3, 0.5), CellLimits(20, 20)), 0.3, 1.0, &conversion_tables_);
-        proto::TSDFRangeDataInserterOptions2D range_data_inserter_options;
-        range_data_inserter_options.set_truncation_distance(0.15);
-        range_data_inserter_options.set_maximum_weight(1.0);
-        range_data_inserter_options.set_update_free_space(false);
-        range_data_inserter_options.mutable_normal_estimation_options()->set_num_normal_samples(4);
-        range_data_inserter_options.mutable_normal_estimation_options()->set_sample_radius(0.5);
-        range_data_inserter_options.set_project_sdf_distance_to_scan_normal(false);
-        range_data_inserter_options.set_update_weight_range_exponent(2);
-        range_data_inserter_options.set_update_weight_angle_scan_normal_to_ray_kernel_bandwidth(0.5);
-        range_data_inserter_options.set_update_weight_distance_cell_to_hit_kernel_bandwidth(0.5);
-        range_data_inserter_ = absl::make_unique<TSDFRangeDataInserter2D>(range_data_inserter_options);
-        range_data_inserter_->Insert(cartographer::sensor::RangeData{Eigen::Vector3f::Zero(), point_cloud_, {}}, grid_.get());
-        grid_->FinishUpdate();
-    } else {
-        grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(0.05, Eigen::Vector2d(0.05, 0.25), CellLimits(6, 6)), &conversion_tables_);
-        proto::ProbabilityGridRangeDataInserterOptions2D range_data_inserter_options;
-        range_data_inserter_options.set_hit_probability(0.7);
-        range_data_inserter_options.set_miss_probability(0.4);
-        range_data_inserter_options.set_insert_free_space(true);
-        range_data_inserter_ = absl::make_unique<ProbabilityGridRangeDataInserter2D>(range_data_inserter_options);
-        range_data_inserter_->Insert(cartographer::sensor::RangeData{Eigen::Vector3f::Zero(), point_cloud_, {}}, grid_.get());
-        grid_->FinishUpdate();
+    if (point_clouds_source == "run_scans") {
+        cout << "/home/enrico/tmp/covariance.csv:" << endl;
+        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-20_13-21-55_595362_run_000000000/benchmark_data/scans.csv");
+
+        for (std::string line_str; getline(infile, line_str);) {
+            std::stringstream ss(line_str);
+            vector<string> values;
+            for (string v; ss >> v;) {
+                values.push_back(v);
+                while (ss.peek() == ',' || ss.peek() == ' ') ss.ignore();
+            }
+
+            double /*t = stof(values[0]), */angle_min = stof(values[1]), /*angle_max = stof(values[2]), */angle_increment = stof(values[3]), range_min = stof(values[4]), range_max = stof(values[5]);
+            std::vector<double> ranges;
+            for (size_t i = 6; i < values.size(); i++) ranges.push_back(stof(values[i]));
+
+            cartographer::sensor::PointCloud point_cloud;
+            insert_ranges_to_point_cloud(point_cloud, ranges, angle_min, angle_increment, range_min, range_max);
+            point_clouds.push_back(point_cloud);
+            if(range_max > range_max_) range_max_ = range_max;
+        }
     }
 
-    auto make_grid_t_end = chrono::high_resolution_clock::now();
-    double make_grid_elapsed_time_ms = chrono::duration<double, milli>(make_grid_t_end - make_grid_t_start).count();
-    cout << "make_grid_elapsed_time_ms " << make_grid_elapsed_time_ms << endl;
+    grid_image_mat = cv::imread("/home/enrico/Pictures/olson_scan.png", CV_8UC1);
+    grid_image_w = grid_image_mat.cols;
+    grid_image_h = grid_image_mat.rows;
+    grid_image_res = 0.1; // meters per pixel
+    if (point_clouds_source == "olson") {
+        cartographer::sensor::PointCloud point_cloud;
+        for (int i = 0; i < grid_image_w; i++) {
+            float x = (i - grid_image_w / 2) * grid_image_res;
+            for (int j = 0; j < grid_image_h; j++) {
+                float y = (grid_image_h / 2 - j) * grid_image_res;
+                if (grid_image_mat.at<uint8_t>(i, j) < 128) {
+                    point_cloud.push_back({Eigen::Vector3f{x, y, 0.0}});
+                }
+            }
+        }
+        point_clouds.push_back(point_cloud);
+    }
 
-    // Compute the scores and covariance
-    auto compute_covariance_t_start = chrono::high_resolution_clock::now();
+    int point_cloud_count = 0;
+    for (auto point_cloud : point_clouds) {
+        // Probability grid (from scan itself)
+        unique_ptr<Grid2D> grid_;
+        ValueConversionTables conversion_tables_;
+        unique_ptr<RangeDataInserterInterface> range_data_inserter_;
+        if (grid_source_ == "tsdf_from_ranges") {
+            grid_ = absl::make_unique<TSDF2D>(MapLimits(0.05, Eigen::Vector2d(0.05, 0.25), CellLimits(6, 6)), 0.3, 1.0, &conversion_tables_);
+            proto::TSDFRangeDataInserterOptions2D range_data_inserter_options;
+            range_data_inserter_options.set_truncation_distance(0.15);
+            range_data_inserter_options.set_maximum_weight(1.0);
+            range_data_inserter_options.set_update_free_space(false);
+            range_data_inserter_options.mutable_normal_estimation_options()->set_num_normal_samples(3);
+            range_data_inserter_options.mutable_normal_estimation_options()->set_sample_radius(0.5);
+            range_data_inserter_options.set_project_sdf_distance_to_scan_normal(true);
+            range_data_inserter_options.set_update_weight_range_exponent(0);
+            range_data_inserter_options.set_update_weight_angle_scan_normal_to_ray_kernel_bandwidth(0.5);
+            range_data_inserter_options.set_update_weight_distance_cell_to_hit_kernel_bandwidth(0.5);
+            range_data_inserter_ = absl::make_unique<TSDFRangeDataInserter2D>(range_data_inserter_options);
+            range_data_inserter_->Insert(cartographer::sensor::RangeData{Eigen::Vector3f::Zero(), point_cloud, {}}, grid_.get());
+            grid_->FinishUpdate();
+        } else if (grid_source_ == "probability_grid_from_ranges") {
+            if (point_clouds_source == "run_scans") {
+                grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(range_max_, range_max_), CellLimits(2*range_max_/probability_grid_res_, 2*range_max_/probability_grid_res_)), &conversion_tables_);
+            }else{
+                grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(0.05, 0.25), CellLimits(6, 6)), &conversion_tables_);
+            }
+            proto::ProbabilityGridRangeDataInserterOptions2D range_data_inserter_options;
+            range_data_inserter_options.set_hit_probability(1.0);
+            range_data_inserter_options.set_miss_probability(0.0);
+            range_data_inserter_options.set_insert_free_space(false);
+            range_data_inserter_ = absl::make_unique<ProbabilityGridRangeDataInserter2D>(range_data_inserter_options);
+            range_data_inserter_->Insert(cartographer::sensor::RangeData{Eigen::Vector3f::Zero(), point_cloud, {}}, grid_.get());
+            grid_->FinishUpdate();
+        } else if (grid_source_ == "map" and point_clouds_source == "olson") {
+            grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(grid_image_res, Eigen::Vector2d(grid_image_res * grid_image_w, grid_image_res * grid_image_h) * 0.5, CellLimits(grid_image_w, grid_image_h)), &conversion_tables_);
+            ProbabilityGrid *const probability_grid = static_cast<ProbabilityGrid *>(grid_.get());
 
-    auto real_time_correlative_scan_matcher_options_ = scan_matching::proto::RealTimeCorrelativeScanMatcherOptions();
-    real_time_correlative_scan_matcher_options_.set_angular_search_window(0.392);
-    real_time_correlative_scan_matcher_options_.set_linear_search_window(2.0);
-    real_time_correlative_scan_matcher_options_.set_rotation_delta_cost_weight(0.5);
-    real_time_correlative_scan_matcher_options_.set_translation_delta_cost_weight(0.5);
+            if (apply_gaussian_blur) {
 
-    unique_ptr<scan_matching::RealTimeCorrelativeScanMatcher2D> real_time_correlative_scan_matcher_;
-    real_time_correlative_scan_matcher_ = absl::make_unique<scan_matching::RealTimeCorrelativeScanMatcher2D>(real_time_correlative_scan_matcher_options_);
-    vector<scan_matching::Candidate2D> candidates = real_time_correlative_scan_matcher_->ComputeCovariance(point_cloud_, *grid_);
-    const scan_matching::Candidate2D &best_candidate = *std::max_element(candidates.begin(), candidates.end());
-    double best_score = best_candidate.score;
+                Mat gaussian_blur_grid_image_mat;
+                cv::GaussianBlur(grid_image_mat, gaussian_blur_grid_image_mat, cv::Size(), 4.0, 4.0);
 
-    auto compute_covariance_t_end = chrono::high_resolution_clock::now();
-    double compute_covariance_elapsed_time_ms = chrono::duration<double, milli>(compute_covariance_t_end - compute_covariance_t_start).count();
-    cout << "compute_covariance_elapsed_time_ms " << compute_covariance_elapsed_time_ms << endl;
+                double max_p_gaussian = 0.0;
+                for (int i = 0; i < grid_image_w; i++) {
+                    for (int j = 0; j < grid_image_h; j++) {
+                        double p_gaussian = 1.0 - (double) gaussian_blur_grid_image_mat.at<uint8_t>(grid_image_h - j - 1, i) / 255;
+                        if (p_gaussian > max_p_gaussian) max_p_gaussian = p_gaussian;
+                    }
+                }
 
-    // Make images of the score for each theta
-    auto make_images_t_start = chrono::high_resolution_clock::now();
+                for (int i = 0; i < grid_image_w; i++) {
+                    for (int j = 0; j < grid_image_h; j++) {
+                        double p = 1.0 - (double) grid_image_mat.at<uint8_t>(grid_image_h - j - 1, i) / 255;
+                        double p_gaussian = 1.0 - (double) gaussian_blur_grid_image_mat.at<uint8_t>(grid_image_h - j - 1, i) / 255;
+                        probability_grid->SetProbability(Eigen::Array2i(i, j), max(p, p_gaussian / max_p_gaussian));
+                    }
+                }
 
-    vector<int> compression_params;
-    compression_params.push_back(IMWRITE_PNG_COMPRESSION);
-    compression_params.push_back(9);
+            } else {
+                for (int i = 0; i < grid_image_w; i++) {
+                    for (int j = 0; j < grid_image_h; j++) {
+                        double p = 1.0 - (double) grid_image_mat.at<uint8_t>(grid_image_h - j - 1, i) / 255;
+                        probability_grid->SetProbability(Eigen::Array2i(i, j), p);
+                    }
+                }
+            }
 
-    map<double, Mat> theta_to_mat;
-    const int num_linear_perturbations = ceil(real_time_correlative_scan_matcher_options_.linear_search_window() / grid_->limits().resolution());
-    int image_size = 1 + 2 * num_linear_perturbations;
-    for (auto candidate : candidates) {
-        double theta = candidate.orientation;
-        int x_image_index = num_linear_perturbations + candidate.x_index_offset;
-        int y_image_index = num_linear_perturbations + candidate.y_index_offset;
-
-        if (!theta_to_mat.count(theta)) theta_to_mat[theta] = Mat(image_size, image_size, CV_8UC3);
-
-        Vec3b color;
-        if (candidate.score == best_score) {
-            color[0] = 0;
-            color[1] = 0;
-            color[2] = 255;
-            cout << "best_score: x: " << x_image_index << " y: " << y_image_index << " theta: " << theta << endl;
+            probability_grid->FinishUpdate();
         } else {
-            uint8_t intensity = (uint8_t) (candidate.score / best_score * 255);  // TODD Should be divided by best_score in covariance too?
-            color[0] = intensity;
-            color[1] = intensity;
-            color[2] = intensity;
+            cerr << "Unknown grid_source" << endl;
         }
-        theta_to_mat[theta].at<Vec3b>(x_image_index, y_image_index) = color;
-    }
 
-    // Make image of the probability grid
-    Mat probability_grid_mat = Mat(grid_->limits().cell_limits().num_x_cells, grid_->limits().cell_limits().num_y_cells, CV_8UC1);
+        auto make_grid_t_end = chrono::high_resolution_clock::now();
+        double make_grid_elapsed_time_ms = chrono::duration<double, milli>(make_grid_t_end - make_grid_t_start).count();
+        cout << "make_grid_elapsed_time_ms " << make_grid_elapsed_time_ms << endl;
 
-    auto probability_grid = static_cast<const ProbabilityGrid &>(*grid_);
-    for (int i = 0; i < grid_->limits().cell_limits().num_x_cells; i++) {
-        for (int j = 0; j < grid_->limits().cell_limits().num_y_cells; j++) {
-            float probability = probability_grid.GetProbability(Eigen::Array2i(i, j));
-            char intensity = (char) (probability * 255);
-            probability_grid_mat.at<char>(i, j) = intensity;
+        // Compute the scores and covariance
+        auto compute_covariance_t_start = chrono::high_resolution_clock::now();
+
+        auto real_time_correlative_scan_matcher_options_ = scan_matching::proto::RealTimeCorrelativeScanMatcherOptions();
+        real_time_correlative_scan_matcher_options_.set_angular_search_window(0.196);  // 0.392: 45° total, 0.785: 90° total,
+        real_time_correlative_scan_matcher_options_.set_linear_search_window(2);
+        real_time_correlative_scan_matcher_options_.set_rotation_delta_cost_weight(0.0);
+        real_time_correlative_scan_matcher_options_.set_translation_delta_cost_weight(0.0);
+
+        double score_resolution = 0.05;
+        int num_angular_perturbations = 5;
+        int num_linear_perturbations = std::ceil(real_time_correlative_scan_matcher_options_.linear_search_window() / score_resolution);
+        double angular_perturbation_step_size = real_time_correlative_scan_matcher_options_.angular_search_window() / num_angular_perturbations;
+        scan_matching::SearchParameters search_parameters(num_linear_perturbations, num_angular_perturbations, angular_perturbation_step_size, score_resolution);
+
+        unique_ptr<scan_matching::RealTimeCorrelativeScanMatcher2D> real_time_correlative_scan_matcher_;
+        real_time_correlative_scan_matcher_ = absl::make_unique<scan_matching::RealTimeCorrelativeScanMatcher2D>(real_time_correlative_scan_matcher_options_);
+        vector<scan_matching::Candidate2D> candidates = real_time_correlative_scan_matcher_->ComputeCovariance(point_cloud, *grid_, search_parameters);
+
+        auto compute_covariance_t_end = chrono::high_resolution_clock::now();
+        double compute_covariance_elapsed_time_ms = chrono::duration<double, milli>(compute_covariance_t_end - compute_covariance_t_start).count();
+        cout << "compute_covariance_elapsed_time_ms " << compute_covariance_elapsed_time_ms << endl;
+
+        auto make_images_t_start = chrono::high_resolution_clock::now();
+
+        // Make images of the score for each theta
+        vector<int> compression_params;
+        compression_params.push_back(IMWRITE_PNG_COMPRESSION);
+        compression_params.push_back(9);
+
+        map<double, Mat> theta_to_scores_mat = map<double, Mat>();
+        int image_size = 1 + 2 * num_linear_perturbations;
+        for (auto candidate : candidates) {
+            double theta = candidate.orientation;
+            int i = image_size - num_linear_perturbations - candidate.y_index_offset - 1;
+            int j = image_size - num_linear_perturbations - candidate.x_index_offset - 1;
+
+            if (!theta_to_scores_mat.count(theta)) theta_to_scores_mat[theta] = Mat(image_size, image_size, CV_8UC3);
+
+            uint8_t intensity = (uint8_t) (candidate.score * 255);  // TODD Should be divided by best_score in covariance too?
+            theta_to_scores_mat[theta].at<Vec3b>(image_size - j - 1, i) = colorMap(intensity, palette_str);
         }
-    }
-    auto make_images_t_end = chrono::high_resolution_clock::now();
-    double make_images_elapsed_time_ms = chrono::duration<double, milli>(make_images_t_end - make_images_t_start).count();
-    cout << "make_images_elapsed_time_ms " << make_images_elapsed_time_ms << endl;
 
-    // Save images of the score
-    auto save_images_t_start = chrono::high_resolution_clock::now();
-    for (auto const &theta_mat : theta_to_mat) {
-        double theta = theta_mat.first;
-        Mat mat = theta_mat.second;
-        Mat upscaled_mat;
-        cv::resize(mat, upscaled_mat, cv::Size(), 10.0, 10.0, cv::INTER_NEAREST);
-        ostringstream filename_ss;
-        filename_ss << "/home/enrico/tmp/gs/candidates_score_" << (int) (1000 * (theta + real_time_correlative_scan_matcher_options_.angular_search_window())) << "theta_" << theta << ".png";
-        bool result = false;
+        // Make image of the probability grid
+        int probability_grid_mat_w = grid_->limits().cell_limits().num_x_cells;
+        int probability_grid_mat_h = grid_->limits().cell_limits().num_y_cells;
+//        Mat probability_grid_mat = Mat(probability_grid_mat_h, probability_grid_mat_w, CV_8UC1);
+        Mat probability_grid_mat = Mat(probability_grid_mat_h, probability_grid_mat_w, CV_8UC3);
+
+        auto probability_grid = static_cast<const ProbabilityGrid &>(*grid_);
+        for (int i = 0; i < probability_grid_mat_w; i++) {
+            for (int j = 0; j < probability_grid_mat_h; j++) {
+                float probability = probability_grid.GetProbability(Eigen::Array2i(probability_grid_mat_h - j - 1, probability_grid_mat_w - i - 1));
+                Vec3b color = Vec3b();
+                color[0] = 255 * probability;
+                color[1] = 255 * probability;
+                color[2] = 255 * probability;
+                probability_grid_mat.at<Vec3b>(probability_grid_mat_h - j - 1, i) = color;
+            }
+        }
+        auto make_images_t_end = chrono::high_resolution_clock::now();
+        double make_images_elapsed_time_ms = chrono::duration<double, milli>(make_images_t_end - make_images_t_start).count();
+        cout << "make_images_elapsed_time_ms " << make_images_elapsed_time_ms << endl;
+
+        // Save images of the score
+        auto save_images_t_start = chrono::high_resolution_clock::now();
+        vector<Mat> tiled_scores_mat_vec;
+//        int image_theta_count = 0;
+        for (auto const &theta_scores_mat : theta_to_scores_mat) {
+            Mat scores_mat_with_border = Mat(theta_scores_mat.second.rows + 2, theta_scores_mat.second.cols + 2, CV_8UC3);
+            scores_mat_with_border(cv::Rect_<int>(0, 0, scores_mat_with_border.cols, scores_mat_with_border.rows)) = Vec3b(20, 20, 20);
+            theta_scores_mat.second.copyTo(scores_mat_with_border(cv::Rect_<int>(1, 1, theta_scores_mat.second.cols, theta_scores_mat.second.rows)));
+            tiled_scores_mat_vec.push_back(scores_mat_with_border);
+
+//            cv::resize(scores_mat_with_border, scores_mat_with_border, cv::Size(), 10.0, 10.0, cv::INTER_NEAREST);
+//            double theta = theta_scores_mat.first;
+//            ostringstream filename_ss;
+//            filename_ss << "/home/enrico/tmp/gs/candidates_score_" << image_theta_count++ << "_theta_" << theta << ".png";
+//            bool result = false;
+//            try {
+//                result = imwrite(filename_ss.str(), scores_mat_with_border, compression_params);
+//            } catch (const cv::Exception &ex) {
+//                fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
+//            }
+//            if (!result) {
+//                cerr << "Failed to write image" << endl;
+//            }
+        }
+
+        Mat tiled_scores_mat;
+        cv::hconcat(tiled_scores_mat_vec, tiled_scores_mat);
+//        try {
+//            ostringstream filename_tiled_scores_mat_ss;
+//            filename_tiled_scores_mat_ss << "/home/enrico/tmp/gs/candidates_score_tiled_" << point_cloud_count << ".png";
+//            imwrite(filename_tiled_scores_mat_ss.str(), tiled_scores_mat, compression_params);
+//        } catch (const cv::Exception &ex) {
+//            fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
+//        }
+//
+//        // Save image of the probability grid
+//        ostringstream probability_grid_filename_ss;
+//        probability_grid_filename_ss << "/home/enrico/tmp/gs/probability_grid_" << point_cloud_count << ".png";
+//        bool probability_grid_result = false;
+//        try {
+//            probability_grid_result = imwrite(probability_grid_filename_ss.str(), probability_grid_mat, compression_params);
+//        } catch (const cv::Exception &ex) {
+//            fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
+//        }
+//        if (!probability_grid_result) {
+//            cerr << "Failed to write image" << endl;
+//        }
+
+        Mat tiled_all_mat = Mat(probability_grid_mat.rows + tiled_scores_mat.rows, max(probability_grid_mat.cols, tiled_scores_mat.cols), CV_8UC3);
+        tiled_all_mat(cv::Rect_<int>(0, 0, tiled_all_mat.cols, tiled_all_mat.rows)) = Vec3b();
+        probability_grid_mat.copyTo(tiled_all_mat(cv::Rect_<int>(tiled_all_mat.cols / 2 - probability_grid_mat.cols / 2, 0, probability_grid_mat.cols, probability_grid_mat.rows)));
+        tiled_scores_mat.copyTo(tiled_all_mat(cv::Rect_<int>(tiled_all_mat.cols / 2 - tiled_scores_mat.cols / 2, probability_grid_mat.rows, tiled_scores_mat.cols, tiled_scores_mat.rows)));
+
         try {
-            result = imwrite(filename_ss.str(), upscaled_mat, compression_params);
+            ostringstream filename_tiled_all_ss;
+            filename_tiled_all_ss << "/home/enrico/tmp/gs/tiled_all_" << setfill('0') << setw(5) <<point_cloud_count << ".png";
+            imwrite(filename_tiled_all_ss.str(), tiled_all_mat, compression_params);
         } catch (const cv::Exception &ex) {
             fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
         }
-        if (!result) {
-            cerr << "Failed to write image" << endl;
-        }
+
+
+        auto save_images_t_end = chrono::high_resolution_clock::now();
+        double save_images_elapsed_time_ms = chrono::duration<double, milli>(save_images_t_end - save_images_t_start).count();
+        cout << "save_images_elapsed_time_ms " << save_images_elapsed_time_ms << endl;
+
+
+        point_cloud_count++;
     }
 
-    // Save image of the probability grid
-    ostringstream probability_grid_filename_ss;
-    probability_grid_filename_ss << "/home/enrico/tmp/gs/probability_grid_.png";
-    bool probability_grid_result = false;
+    vector<int> palette_compression_params;
+    palette_compression_params.push_back(IMWRITE_PNG_COMPRESSION);
+    palette_compression_params.push_back(9);
+    int w = 256, h = 50;
+    Mat palette_mat = Mat(h, w, CV_8UC3);
+    for (int i = 0; i < w; i++) {
+        uint8_t intensity = i;
+        Vec3b color = colorMap(intensity, palette_str);
+        for (int j = 0; j < h; j++) {
+            palette_mat.at<Vec3b>(j, i) = color;
+        }
+    }
     try {
-        Mat upscaled_probability_grid_mat;
-        cv::resize(probability_grid_mat, upscaled_probability_grid_mat, cv::Size(), 10.0, 10.0, cv::INTER_NEAREST);
-        probability_grid_result = imwrite(probability_grid_filename_ss.str(), upscaled_probability_grid_mat, compression_params);
+        imwrite("/home/enrico/tmp/gs/palette.png", palette_mat, palette_compression_params);
     } catch (const cv::Exception &ex) {
         fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
     }
-    if (!probability_grid_result) {
-        cerr << "Failed to write image" << endl;
-    }
-
-    auto save_images_t_end = chrono::high_resolution_clock::now();
-    double save_images_elapsed_time_ms = chrono::duration<double, milli>(save_images_t_end - save_images_t_start).count();
-    cout << "save_images_elapsed_time_ms " << save_images_elapsed_time_ms << endl;
 
     // TODO: compute
     //  - grid from scan_gt
+    //  - keep translation/rotation_delta_cost_weight?
+    //  - manually set linear and rotation step
     //  - covariance
     //  - covariance sum or something to get an overall measure of similarity (max axis for translation?)
+    //  - eigen vectors
     //  - translation_covariance_axis·direction_of_translation
     //  - rotation_covariance·rotation
     return 0;

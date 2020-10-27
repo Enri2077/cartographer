@@ -106,8 +106,7 @@ double RealTimeCorrelativeScanMatcher2D::Match(const transform::Rigid2d &initial
     return best_candidate.score;
 }
 
-std::vector<Candidate2D> RealTimeCorrelativeScanMatcher2D::ComputeCovariance(const sensor::PointCloud &point_cloud, const Grid2D &grid) const {
-    const SearchParameters search_parameters(options_.linear_search_window(), options_.angular_search_window(), point_cloud, grid.limits().resolution());
+std::vector<Candidate2D> RealTimeCorrelativeScanMatcher2D::ComputeCovariance(const sensor::PointCloud &point_cloud, const Grid2D &grid, const SearchParameters search_parameters) const {
     const std::vector<sensor::PointCloud> rotated_scans = GenerateRotatedScans(point_cloud, search_parameters);
     const std::vector<DiscreteScan2D> discrete_scans = DiscretizeScans(grid.limits(), rotated_scans, Eigen::Translation2f(0.0, 0.0));
     std::vector<Candidate2D> candidates = GenerateExhaustiveSearchCandidates(search_parameters);
