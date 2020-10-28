@@ -134,16 +134,17 @@ void insert_ranges_to_point_cloud(cartographer::sensor::PointCloud &cloud_out, v
 
 int main() {
 
+    auto all_t_start = chrono::high_resolution_clock::now();
     string grid_source_ = "probability_grid_from_ranges"; // map, probability_grid_from_ranges, tsdf_from_ranges;
     bool apply_gaussian_blur = true;
     string palette_str = "black,blue,green,red"; // "black,blue,yellow";
 
     string point_clouds_source = "run_scans"; // olson, fake_corridor, run_scans
-    double probability_grid_res_ = 0.025;
+    double probability_grid_res_ = 0.05;
 
-    auto make_grid_t_start = chrono::high_resolution_clock::now();
 
     // Scan
+    auto make_point_clouds_t_start = chrono::high_resolution_clock::now();
     vector<cartographer::sensor::PointCloud> point_clouds;
     Mat grid_image_mat;
     int grid_image_w;
@@ -166,8 +167,9 @@ int main() {
     }
 
     if (point_clouds_source == "run_scans") {
-        cout << "/home/enrico/tmp/covariance.csv:" << endl;
-        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-20_13-21-55_595362_run_000000000/benchmark_data/scans.csv");
+//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-20_13-21-55_595362_run_000000000/benchmark_data/scans.csv");
+//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-27_21-56-48_330445_run_000000000/benchmark_data/scans_gt.csv");
+        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-27_22-42-44_740120_run_000000000/benchmark_data/scans_gt.csv");
 
         for (std::string line_str; getline(infile, line_str);) {
             std::stringstream ss(line_str);
@@ -177,7 +179,8 @@ int main() {
                 while (ss.peek() == ',' || ss.peek() == ' ') ss.ignore();
             }
 
-            double /*t = stof(values[0]), */angle_min = stof(values[1]), /*angle_max = stof(values[2]), */angle_increment = stof(values[3]), range_min = stof(values[4]), range_max = stof(values[5]);
+            double /*t = stof(values[0]), */angle_min = stof(values[1]), /*angle_max = stof(values[2]), */angle_increment = stof(values[3]), range_min = stof(values[4]); //range_max = stof(values[5]);
+            double range_max = 30.0;  // to ignore ranges higher than 30.0
             std::vector<double> ranges;
             for (size_t i = 6; i < values.size(); i++) ranges.push_back(stof(values[i]));
 
@@ -206,8 +209,14 @@ int main() {
         point_clouds.push_back(point_cloud);
     }
 
+    auto make_point_clouds_t_end = chrono::high_resolution_clock::now();
+    double make_point_clouds_elapsed_time_ms = chrono::duration<double, milli>(make_point_clouds_t_end - make_point_clouds_t_start).count();
+    cout << "make_point_clouds_elapsed_time_ms " << make_point_clouds_elapsed_time_ms << endl;
+
     int point_cloud_count = 0;
     for (auto point_cloud : point_clouds) {
+        auto make_grid_t_start = chrono::high_resolution_clock::now();
+
         // Probability grid (from scan itself)
         unique_ptr<Grid2D> grid_;
         ValueConversionTables conversion_tables_;
@@ -395,6 +404,8 @@ int main() {
 //            cerr << "Failed to write image" << endl;
 //        }
 
+        cv::resize(tiled_scores_mat, tiled_scores_mat, cv::Size(), 3, 3, cv::INTER_NEAREST);
+
         Mat tiled_all_mat = Mat(probability_grid_mat.rows + tiled_scores_mat.rows, max(probability_grid_mat.cols, tiled_scores_mat.cols), CV_8UC3);
         tiled_all_mat(cv::Rect_<int>(0, 0, tiled_all_mat.cols, tiled_all_mat.rows)) = Vec3b();
         probability_grid_mat.copyTo(tiled_all_mat(cv::Rect_<int>(tiled_all_mat.cols / 2 - probability_grid_mat.cols / 2, 0, probability_grid_mat.cols, probability_grid_mat.rows)));
@@ -408,13 +419,12 @@ int main() {
             fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
         }
 
-
         auto save_images_t_end = chrono::high_resolution_clock::now();
         double save_images_elapsed_time_ms = chrono::duration<double, milli>(save_images_t_end - save_images_t_start).count();
         cout << "save_images_elapsed_time_ms " << save_images_elapsed_time_ms << endl;
 
-
         point_cloud_count++;
+        cout << point_cloud_count << "/" << point_clouds.size() << endl << endl;
     }
 
     vector<int> palette_compression_params;
@@ -434,6 +444,12 @@ int main() {
     } catch (const cv::Exception &ex) {
         fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
     }
+
+    auto all_t_end = chrono::high_resolution_clock::now();
+    double all_elapsed_time_ms = chrono::duration<double, milli>(all_t_end - all_t_start).count();
+    cout << "all_elapsed_time_ms " << all_elapsed_time_ms << endl;
+
+    // make video from tiled images with `ffmpeg -r 10 -i tiled_all_%05d.png -vcodec libx265 -crf 10 out.mp4`
 
     // TODO: compute
     //  - grid from scan_gt
