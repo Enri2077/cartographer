@@ -66,7 +66,7 @@ class RealTimeCorrelativeScanMatcher2D {
     // Aligns 'point_cloud' within the 'grid' given an
     // 'initial_pose_estimate' then updates 'pose_estimate' with the result and
     // returns the score.
-    std::vector<Candidate2D> ComputeCovariance(const sensor::PointCloud &point_cloud, const Grid2D &grid, const SearchParameters) const;
+    std::vector<Candidate2D> ComputeCovariance(const sensor::PointCloud &point_cloud, const Grid2D &grid, const SearchParameters, Eigen::Matrix3d &covariance) const;
 
     // Computes the score for each Candidate2D in a collection. The cost is
     // computed as the sum of probabilities or normalized TSD values, different

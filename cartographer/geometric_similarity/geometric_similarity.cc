@@ -11,7 +11,7 @@
 #include "cartographer/mapping/proto/scan_matching/real_time_correlative_scan_matcher_options.pb.h"
 #include "Eigen/Geometry"
 
-#include "absl/memory/memory.h"
+//#include "absl/memory/memory.h"
 #include "cartographer/sensor/point_cloud.h"
 #include "cartographer/mapping/2d/grid_2d.h"
 #include "cartographer/mapping/2d/probability_grid.h"
@@ -103,6 +103,33 @@ Vec3b colorMap(uint8_t in, string palette) {
 }
 
 
+cv::RotatedRect getErrorEllipse(double chi_square_val, cv::Point2f mean, cv::Mat cov_mat) {
+    // From https://gist.github.com/eroniki/2cff517bdd3f9d8051b5
+
+    // Get the eigenvalues and eigenvectors
+    cv::Mat eigenvalues, eigenvectors;
+    cv::eigen(cov_mat, eigenvalues, eigenvectors);
+
+    // Calculate the angle between the largest eigenvector and the x-axis
+    double angle = atan2(eigenvectors.at<double>(0, 1), eigenvectors.at<double>(0, 0));
+
+    // Shift the angle to the [0, 2pi] interval instead of [-pi, pi]
+    if (angle < 0)
+        angle += 6.28318530718;
+
+    // Convert to degrees instead of radians
+    angle = 180 * angle / 3.14159265359;
+
+    // Calculate the size of the minor and major axes
+    double half_major_axis_size = chi_square_val * sqrt(eigenvalues.at<double>(0));
+    double half_minor_axis_size = chi_square_val * sqrt(eigenvalues.at<double>(1));
+
+    // Return the oriented ellipse
+    // The -angle is used because OpenCV defines the angle clockwise instead of anti-clockwise
+    return cv::RotatedRect(mean, cv::Size2f(half_major_axis_size, half_minor_axis_size), -angle);
+
+}
+
 void insert_ranges_to_point_cloud(cartographer::sensor::PointCloud &cloud_out, vector<double> ranges_in, double angle_min, double angle_increment, double range_min, double range_max) {
     size_t n_pts = ranges_in.size();
     Eigen::ArrayXXf ranges(n_pts, 2);
@@ -134,12 +161,29 @@ void insert_ranges_to_point_cloud(cartographer::sensor::PointCloud &cloud_out, v
 
 int main() {
 
+
+//    //Covariance matrix of our data
+//    cv::Mat cov_mat = (cv::Mat_<double>(2, 2) << 500, 0, 0, 100);
+//
+//    //The mean of our data
+//    cv::Point2f mean(160, 120);
+//
+//    //Calculate the error ellipse for a 95% confidence interval
+//    cv::RotatedRect ellipse = getErrorEllipse(2.4477, mean, cov_mat);
+//
+//    //Show the result
+//    cv::Mat visualize_image(240, 320, CV_8UC1, cv::Scalar::all(0));
+//    cv::ellipse(visualize_image, ellipse, cv::Scalar::all(255), 1);
+//    cv::imshow("EllipseDemo", visualize_image);
+//    cv::waitKey();
+//    return 0;
+
     auto all_t_start = chrono::high_resolution_clock::now();
     string grid_source_ = "probability_grid_from_ranges"; // map, probability_grid_from_ranges, tsdf_from_ranges;
     bool apply_gaussian_blur = true;
     string palette_str = "black,blue,green,red"; // "black,blue,yellow";
 
-    string point_clouds_source = "run_scans"; // olson, fake_corridor, run_scans
+    string point_clouds_source = "fake_corridor"; // olson, no_points, fake_corridor, run_scans
     double probability_grid_res_ = 0.05;
 
 
@@ -151,6 +195,11 @@ int main() {
     int grid_image_h;
     double grid_image_res;
     double range_max_ = 0.0;
+
+    if (point_clouds_source == "no_points") {
+        cartographer::sensor::PointCloud point_cloud;
+        point_clouds.push_back(point_cloud);
+    }
 
     if (point_clouds_source == "fake_corridor") {
         cartographer::sensor::PointCloud point_cloud;
@@ -164,12 +213,14 @@ int main() {
         for (int i = 0; i < num_wall_points; i++) {
             if (i < num_wall_points / 2 - 15 || i > num_wall_points / 2 + 15) point_cloud.push_back({right_wall + wall / num_wall_points * i});
         }
+        point_clouds.push_back(point_cloud);
     }
 
     if (point_clouds_source == "run_scans") {
-//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-20_13-21-55_595362_run_000000000/benchmark_data/scans.csv");
-//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-27_21-56-48_330445_run_000000000/benchmark_data/scans_gt.csv");
-        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-27_22-42-44_740120_run_000000000/benchmark_data/scans_gt.csv");
+//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-20_13-21-55_595362_run_000000000/benchmark_data/scans.csv");  // airlab /scan
+        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-27_21-56-48_330445_run_000000000/benchmark_data/scans_gt.csv");  // airlab /scan_gt
+//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-27_22-42-44_740120_run_000000000/benchmark_data/scans_gt.csv");  // 7A-B /scan_gt
+//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-28_09-24-03_450309_run_000000002/benchmark_data/scans_gt.csv");  // fr079 /scan_gt
 
         for (std::string line_str; getline(infile, line_str);) {
             std::stringstream ss(line_str);
@@ -187,7 +238,7 @@ int main() {
             cartographer::sensor::PointCloud point_cloud;
             insert_ranges_to_point_cloud(point_cloud, ranges, angle_min, angle_increment, range_min, range_max);
             point_clouds.push_back(point_cloud);
-            if(range_max > range_max_) range_max_ = range_max;
+            if (range_max > range_max_) range_max_ = range_max;
         }
     }
 
@@ -222,7 +273,7 @@ int main() {
         ValueConversionTables conversion_tables_;
         unique_ptr<RangeDataInserterInterface> range_data_inserter_;
         if (grid_source_ == "tsdf_from_ranges") {
-            grid_ = absl::make_unique<TSDF2D>(MapLimits(0.05, Eigen::Vector2d(0.05, 0.25), CellLimits(6, 6)), 0.3, 1.0, &conversion_tables_);
+            grid_ = absl::make_unique<TSDF2D>(MapLimits(probability_grid_res_, Eigen::Vector2d(0.05, 0.25), CellLimits(6, 6)), 0.3, 1.0, &conversion_tables_);
             proto::TSDFRangeDataInserterOptions2D range_data_inserter_options;
             range_data_inserter_options.set_truncation_distance(0.15);
             range_data_inserter_options.set_maximum_weight(1.0);
@@ -238,8 +289,8 @@ int main() {
             grid_->FinishUpdate();
         } else if (grid_source_ == "probability_grid_from_ranges") {
             if (point_clouds_source == "run_scans") {
-                grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(range_max_, range_max_), CellLimits(2*range_max_/probability_grid_res_, 2*range_max_/probability_grid_res_)), &conversion_tables_);
-            }else{
+                grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(range_max_, range_max_), CellLimits(2 * range_max_ / probability_grid_res_, 2 * range_max_ / probability_grid_res_)), &conversion_tables_);
+            } else {
                 grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(0.05, 0.25), CellLimits(6, 6)), &conversion_tables_);
             }
             proto::ProbabilityGridRangeDataInserterOptions2D range_data_inserter_options;
@@ -297,7 +348,7 @@ int main() {
 
         auto real_time_correlative_scan_matcher_options_ = scan_matching::proto::RealTimeCorrelativeScanMatcherOptions();
         real_time_correlative_scan_matcher_options_.set_angular_search_window(0.196);  // 0.392: 45° total, 0.785: 90° total,
-        real_time_correlative_scan_matcher_options_.set_linear_search_window(2);
+        real_time_correlative_scan_matcher_options_.set_linear_search_window(1.0);
         real_time_correlative_scan_matcher_options_.set_rotation_delta_cost_weight(0.0);
         real_time_correlative_scan_matcher_options_.set_translation_delta_cost_weight(0.0);
 
@@ -309,7 +360,9 @@ int main() {
 
         unique_ptr<scan_matching::RealTimeCorrelativeScanMatcher2D> real_time_correlative_scan_matcher_;
         real_time_correlative_scan_matcher_ = absl::make_unique<scan_matching::RealTimeCorrelativeScanMatcher2D>(real_time_correlative_scan_matcher_options_);
-        vector<scan_matching::Candidate2D> candidates = real_time_correlative_scan_matcher_->ComputeCovariance(point_cloud, *grid_, search_parameters);
+        Eigen::Matrix3d covariance;
+        vector<scan_matching::Candidate2D> candidates = real_time_correlative_scan_matcher_->ComputeCovariance(point_cloud, *grid_, search_parameters, covariance);
+        cout << "covariance: " << endl << covariance << endl;
 
         auto compute_covariance_t_end = chrono::high_resolution_clock::now();
         double compute_covariance_elapsed_time_ms = chrono::duration<double, milli>(compute_covariance_t_end - compute_covariance_t_start).count();
@@ -317,11 +370,13 @@ int main() {
 
         auto make_images_t_start = chrono::high_resolution_clock::now();
 
-        // Make images of the score for each theta
-        vector<int> compression_params;
-        compression_params.push_back(IMWRITE_PNG_COMPRESSION);
-        compression_params.push_back(9);
+        double max_x = 0.0, max_y = 0.0;
+        for (auto candidate : candidates) {
+            if (candidate.x > max_x) max_x = candidate.x;
+            if (candidate.y > max_y) max_y = candidate.y;
+        }
 
+        // Make images of the score for each theta
         map<double, Mat> theta_to_scores_mat = map<double, Mat>();
         int image_size = 1 + 2 * num_linear_perturbations;
         for (auto candidate : candidates) {
@@ -331,27 +386,46 @@ int main() {
 
             if (!theta_to_scores_mat.count(theta)) theta_to_scores_mat[theta] = Mat(image_size, image_size, CV_8UC3);
 
-            uint8_t intensity = (uint8_t) (candidate.score * 255);  // TODD Should be divided by best_score in covariance too?
+            uint8_t intensity = (uint8_t) (candidate.score * 255);
             theta_to_scores_mat[theta].at<Vec3b>(image_size - j - 1, i) = colorMap(intensity, palette_str);
+
+            if (candidate.x == max_x && candidate.y == 0.0) {
+                theta_to_scores_mat[theta].at<Vec3b>(image_size - j - 1, i) = Vec3b(0, 0, 255);  // red: x axis
+            }
+            if (candidate.y == max_y && candidate.x == 0.0) {
+                theta_to_scores_mat[theta].at<Vec3b>(image_size - j - 1, i) = Vec3b(0, 255, 255);  // yellow: y axis
+            }
         }
 
         // Make image of the probability grid
         int probability_grid_mat_w = grid_->limits().cell_limits().num_x_cells;
         int probability_grid_mat_h = grid_->limits().cell_limits().num_y_cells;
-//        Mat probability_grid_mat = Mat(probability_grid_mat_h, probability_grid_mat_w, CV_8UC1);
         Mat probability_grid_mat = Mat(probability_grid_mat_h, probability_grid_mat_w, CV_8UC3);
 
         auto probability_grid = static_cast<const ProbabilityGrid &>(*grid_);
         for (int i = 0; i < probability_grid_mat_w; i++) {
             for (int j = 0; j < probability_grid_mat_h; j++) {
                 float probability = probability_grid.GetProbability(Eigen::Array2i(probability_grid_mat_h - j - 1, probability_grid_mat_w - i - 1));
-                Vec3b color = Vec3b();
-                color[0] = 255 * probability;
-                color[1] = 255 * probability;
-                color[2] = 255 * probability;
+                Vec3b color = Vec3b(255 * probability, 255 * probability, 255 * probability);
                 probability_grid_mat.at<Vec3b>(probability_grid_mat_h - j - 1, i) = color;
             }
         }
+
+        // Covariance matrix of our data
+        Mat cov_mat = (Mat_<double>(2, 2) << covariance(0, 0)/grid_->limits().resolution(), covariance(0, 1)/grid_->limits().resolution(), covariance(1, 0)/grid_->limits().resolution(), covariance(1, 1)/grid_->limits().resolution());
+
+        // The mean of our data
+        Point2f mean(probability_grid_mat_w/2, probability_grid_mat_h/2);  // TODO: maybe switch x, y
+
+        // Calculate the error ellipse for a 95% confidence interval
+        RotatedRect confidence_interval_ellipse = getErrorEllipse(2.4477, mean, cov_mat);
+
+        // Show the result
+//        Mat visualize_image(240, 320, CV_8UC1, Scalar::all(0));
+        ellipse(probability_grid_mat, confidence_interval_ellipse, Scalar::all(255), 1);
+//        imshow("EllipseDemo", visualize_image);
+//        waitKey();
+
         auto make_images_t_end = chrono::high_resolution_clock::now();
         double make_images_elapsed_time_ms = chrono::duration<double, milli>(make_images_t_end - make_images_t_start).count();
         cout << "make_images_elapsed_time_ms " << make_images_elapsed_time_ms << endl;
@@ -412,8 +486,11 @@ int main() {
         tiled_scores_mat.copyTo(tiled_all_mat(cv::Rect_<int>(tiled_all_mat.cols / 2 - tiled_scores_mat.cols / 2, probability_grid_mat.rows, tiled_scores_mat.cols, tiled_scores_mat.rows)));
 
         try {
+            vector<int> compression_params;
+            compression_params.push_back(IMWRITE_PNG_COMPRESSION);
+            compression_params.push_back(9);
             ostringstream filename_tiled_all_ss;
-            filename_tiled_all_ss << "/home/enrico/tmp/gs/tiled_all_" << setfill('0') << setw(5) <<point_cloud_count << ".png";
+            filename_tiled_all_ss << "/home/enrico/tmp/gs/tiled_all_" << setfill('0') << setw(5) << point_cloud_count << ".png";
             imwrite(filename_tiled_all_ss.str(), tiled_all_mat, compression_params);
         } catch (const cv::Exception &ex) {
             fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());

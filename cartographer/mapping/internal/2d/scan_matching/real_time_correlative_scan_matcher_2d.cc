@@ -106,11 +106,32 @@ double RealTimeCorrelativeScanMatcher2D::Match(const transform::Rigid2d &initial
     return best_candidate.score;
 }
 
-std::vector<Candidate2D> RealTimeCorrelativeScanMatcher2D::ComputeCovariance(const sensor::PointCloud &point_cloud, const Grid2D &grid, const SearchParameters search_parameters) const {
+std::vector<Candidate2D> RealTimeCorrelativeScanMatcher2D::ComputeCovariance(const sensor::PointCloud &point_cloud, const Grid2D &grid, const SearchParameters search_parameters, Eigen::Matrix3d &covariance) const {
     const std::vector<sensor::PointCloud> rotated_scans = GenerateRotatedScans(point_cloud, search_parameters);
     const std::vector<DiscreteScan2D> discrete_scans = DiscretizeScans(grid.limits(), rotated_scans, Eigen::Translation2f(0.0, 0.0));
     std::vector<Candidate2D> candidates = GenerateExhaustiveSearchCandidates(search_parameters);
     ScoreCandidates(grid, discrete_scans, search_parameters, &candidates);
+
+    const Candidate2D &min_score_candidate = *std::min_element(candidates.begin(), candidates.end());
+    double min_score = min_score_candidate.score;
+
+    std::cout << "min_score: " << min_score << std::endl;
+
+    Eigen::Matrix3d K = Eigen::Matrix3d::Zero();
+    double s = 0.0;
+
+    for (auto candidate : candidates) {
+        Eigen::Vector3d x(candidate.x, candidate.y, candidate.orientation);
+        double p = (candidate.score - min_score)/(1-min_score);
+        K += x * x.transpose() * p;
+        s += p;
+    }
+
+    if (s > 0.0){
+        covariance = K * (1 / s);
+    }else{
+        covariance = Eigen::Matrix3d::Identity() * std::numeric_limits<double>::infinity();
+    }
 
     return candidates;
 }
