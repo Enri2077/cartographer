@@ -193,7 +193,7 @@ int main(int argc, char **argv) {
     output_file_path = argv[2];
     output_file.open(output_file_path);
 
-    string output_header_line = "t,x_x,x_y,x_theta,y_x,y_y,y_theta,theta_x,theta_y,theta_theta";
+    string output_header_line = "t,x_x,x_y,x_theta,y_x,y_y,y_theta,theta_x,theta_y,theta_theta\n";
     output_file << output_header_line;
 
     cout << "scans_file_path: " << scans_file_path << endl;
