@@ -11,7 +11,6 @@
 #include "cartographer/mapping/proto/scan_matching/real_time_correlative_scan_matcher_options.pb.h"
 #include "Eigen/Geometry"
 
-//#include "absl/memory/memory.h"
 #include "cartographer/sensor/point_cloud.h"
 #include "cartographer/mapping/2d/grid_2d.h"
 #include "cartographer/mapping/2d/probability_grid.h"
@@ -161,31 +160,15 @@ void insert_ranges_to_point_cloud(cartographer::sensor::PointCloud &cloud_out, v
 
 int main(int argc, char **argv) {
 
-
-//    //Covariance matrix of our data
-//    cv::Mat cov_mat = (cv::Mat_<double>(2, 2) << 500, 0, 0, 100);
-//
-//    //The mean of our data
-//    cv::Point2f mean(160, 120);
-//
-//    //Calculate the error ellipse for a 95% confidence interval
-//    cv::RotatedRect ellipse = getErrorEllipse(2.4477, mean, cov_mat);
-//
-//    //Show the result
-//    cv::Mat visualize_image(240, 320, CV_8UC1, cv::Scalar::all(0));
-//    cv::ellipse(visualize_image, ellipse, cv::Scalar::all(255), 1);
-//    cv::imshow("EllipseDemo", visualize_image);
-//    cv::waitKey();
-//    return 0;
-
     string scans_file_path;
     string output_file_path;
     string output_images_file_path;
     ofstream output_file;
     double rate = numeric_limits<double>::infinity();
+    double range_limit = 30.0;
 
-    if (argc <= 2) {
-        cerr << "Args: scans_file_path [output_file_path [rate [output_images_file_path]]]" << endl;
+    if (argc < 3) {
+        cerr << "Args: scans_file_path output_file_path [rate [range_limit [output_images_file_path]]]" << endl;
         return 1;
     }
 
@@ -196,26 +179,30 @@ int main(int argc, char **argv) {
     string output_header_line = "t,x_x,x_y,x_theta,y_x,y_y,y_theta,theta_x,theta_y,theta_theta\n";
     output_file << output_header_line;
 
-    cout << "scans_file_path: " << scans_file_path << endl;
-    cout << "output_file_path: " << output_file_path << endl;
 
     if (argc > 3) {
         rate = atof(argv[3]);
-        cout << "rate: " << rate << endl;
     }
     if (argc > 4) {
-        output_images_file_path = argv[4];
-        cout << "output_images_file_path: " << output_images_file_path << endl;
+        range_limit = atof(argv[4]);
+    }
+    if (argc > 5) {
+        output_images_file_path = argv[5];
     }
 
+    cout << "scans_file_path: " << scans_file_path << endl;
+    cout << "output_file_path: " << output_file_path << endl;
+    cout << "rate: " << rate << endl;
+    cout << "range_limit: " << range_limit << endl;
+    cout << "output_images_file_path: " << output_images_file_path << endl;
+
     auto all_t_start = chrono::high_resolution_clock::now();
-    string grid_source_ = "probability_grid_from_ranges"; // map, probability_grid_from_ranges, tsdf_from_ranges;
+    string grid_source_ = "probability_grid_from_ranges"; // map, probability_grid_from_ranges, probability_grid_from_ranges_with_blur, tsdf_from_ranges;
     string point_clouds_source = "run_scans"; // olson, no_points, fake_corridor, run_scans
     bool apply_gaussian_blur = true;
     string palette_str = "black,blue,green,red"; // "black,blue,yellow";
 
     double probability_grid_res_ = 0.05;
-
 
     // Scan
     auto make_point_clouds_t_start = chrono::high_resolution_clock::now();
@@ -250,11 +237,7 @@ int main(int argc, char **argv) {
     }
 
     if (point_clouds_source == "run_scans") {
-        std::ifstream infile(scans_file_path);  // airlab /scan_gt
-//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-20_13-21-55_595362_run_000000000/benchmark_data/scans.csv");  // airlab /scan
-//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-27_21-56-48_330445_run_000000000/benchmark_data/scans_gt.csv");  // airlab /scan_gt
-//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-27_22-42-44_740120_run_000000000/benchmark_data/scans_gt.csv");  // 7A-B /scan_gt
-//        std::ifstream infile("/home/enrico/ds/performance_modelling/output/test_slam/session_2020-10-28_09-24-03_450309_run_000000002/benchmark_data/scans_gt.csv");  // fr079 /scan_gt
+        std::ifstream infile(scans_file_path);
 
         double last_accepted_scan_time = -numeric_limits<float>::infinity();
         for (std::string line_str; getline(infile, line_str);) {
@@ -267,7 +250,7 @@ int main(int argc, char **argv) {
             }
 
             double t = stof(values[0]), angle_min = stof(values[1]), /*angle_max = stof(values[2]), */angle_increment = stof(values[3]), range_min = stof(values[4]); //range_max = stof(values[5]);
-            double range_max = 30.0;  // to ignore ranges higher than 30.0
+            double range_max = range_limit;  // to ignore ranges higher than range_limit
             std::vector<double> ranges;
             for (size_t i = 6; i < values.size(); i++) ranges.push_back(stof(values[i]));
 
@@ -378,6 +361,57 @@ int main(int argc, char **argv) {
             }
 
             probability_grid->FinishUpdate();
+        } else if (grid_source_ == "probability_grid_from_ranges_with_blur") {
+            unique_ptr<Grid2D> tmp_grid_;
+            if (point_clouds_source == "run_scans") {
+                grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(range_max_, range_max_), CellLimits(2 * range_max_ / probability_grid_res_, 2 * range_max_ / probability_grid_res_)), &conversion_tables_);
+                tmp_grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(range_max_, range_max_), CellLimits(2 * range_max_ / probability_grid_res_, 2 * range_max_ / probability_grid_res_)), &conversion_tables_);
+            } else {
+                grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(0.05, 0.25), CellLimits(6, 6)), &conversion_tables_);
+                tmp_grid_ = absl::make_unique<ProbabilityGrid>(MapLimits(probability_grid_res_, Eigen::Vector2d(range_max_, range_max_), CellLimits(2 * range_max_ / probability_grid_res_, 2 * range_max_ / probability_grid_res_)), &conversion_tables_);
+            }
+            proto::ProbabilityGridRangeDataInserterOptions2D range_data_inserter_options;
+            range_data_inserter_options.set_hit_probability(1.0);
+            range_data_inserter_options.set_miss_probability(0.0);
+            range_data_inserter_options.set_insert_free_space(false);
+            range_data_inserter_ = absl::make_unique<ProbabilityGridRangeDataInserter2D>(range_data_inserter_options);
+            range_data_inserter_->Insert(cartographer::sensor::RangeData{Eigen::Vector3f::Zero(), point_cloud, {}}, tmp_grid_.get());
+            tmp_grid_->FinishUpdate();
+
+            // Make image of the probability grid
+            int probability_grid_mat_w = tmp_grid_->limits().cell_limits().num_x_cells;
+            int probability_grid_mat_h = tmp_grid_->limits().cell_limits().num_y_cells;
+            Mat probability_grid_mat = Mat(probability_grid_mat_h, probability_grid_mat_w, CV_8UC1);
+
+            auto probability_grid = static_cast<const ProbabilityGrid &>(*tmp_grid_);
+            for (int i = 0; i < probability_grid_mat_w; i++) {
+                for (int j = 0; j < probability_grid_mat_h; j++) {
+                    float cartographer_probability = probability_grid.GetProbability(Eigen::Array2i(j, i));
+                    float probability = (cartographer_probability - 0.1) / (1 - 0.1);
+                    probability_grid_mat.at<uint8_t>(j, i) = 255 * probability;
+                }
+            }
+
+            ProbabilityGrid *const blured_probability_grid = static_cast<ProbabilityGrid *>(grid_.get());
+
+            Mat gaussian_blur_grid_image_mat;
+            cv::GaussianBlur(probability_grid_mat, gaussian_blur_grid_image_mat, cv::Size(), 2.0, 2.0);
+
+            double max_p_gaussian = 0.0;
+            for (int i = 0; i < probability_grid_mat_w; i++) {
+                for (int j = 0; j < probability_grid_mat_h; j++) {
+                    double p_gaussian = (double) gaussian_blur_grid_image_mat.at<uint8_t>(j, i) / 255;
+                    if (p_gaussian > max_p_gaussian) max_p_gaussian = p_gaussian;
+                }
+            }
+
+            for (int i = 0; i < probability_grid_mat_w; i++) {
+                for (int j = 0; j < probability_grid_mat_h; j++) {
+                    double p_gaussian = (double) gaussian_blur_grid_image_mat.at<uint8_t>(j, i) / 255;
+                    blured_probability_grid->SetProbability(Eigen::Array2i(j, i), p_gaussian);
+                }
+            }
+            blured_probability_grid->FinishUpdate();
         } else {
             cerr << "Unknown grid_source" << endl;
         }
@@ -403,8 +437,19 @@ int main(int argc, char **argv) {
 
         unique_ptr<scan_matching::RealTimeCorrelativeScanMatcher2D> real_time_correlative_scan_matcher_;
         real_time_correlative_scan_matcher_ = absl::make_unique<scan_matching::RealTimeCorrelativeScanMatcher2D>(real_time_correlative_scan_matcher_options_);
+        vector<scan_matching::Candidate2D> candidates;
         Eigen::Matrix3d covariance;
-        vector<scan_matching::Candidate2D> candidates = real_time_correlative_scan_matcher_->ComputeCovariance(point_cloud, *grid_, search_parameters, covariance);
+        bool inf_covariance;
+        if (!point_cloud.empty()) {
+            candidates = real_time_correlative_scan_matcher_->ComputeCovariance(point_cloud, *grid_, search_parameters, covariance);
+            inf_covariance = false;
+        } else {
+            covariance = Eigen::Matrix3d::Zero();
+            covariance(0, 0) = numeric_limits<double>::infinity();
+            covariance(1, 1) = numeric_limits<double>::infinity();
+            covariance(2, 2) = numeric_limits<double>::infinity();
+            inf_covariance = true;
+        }
         cout << "covariance: " << endl << covariance << endl;
 
         auto compute_covariance_t_end = chrono::high_resolution_clock::now();
@@ -418,7 +463,12 @@ int main(int argc, char **argv) {
         string output_line;
         output_line += to_string(point_cloud_timestamp) + ",";
         for (int i = 0; i < covariance_flattened.size(); i++) {
-            output_line += to_string(covariance_flattened[i]) + ",";
+            if (isinf(covariance_flattened[i]))
+                output_line += "inf,";
+            else if (isnan(covariance_flattened[i]))
+                output_line += "nan,";
+            else
+                output_line += to_string(covariance_flattened[i]) + ",";
         }
         output_line.pop_back();
         output_line += "\n";
@@ -431,7 +481,7 @@ int main(int argc, char **argv) {
 
         auto make_images_t_start = chrono::high_resolution_clock::now();
 
-        if (!output_images_file_path.empty()) {
+        if (!output_images_file_path.empty() && !inf_covariance) {
 
             double max_x = 0.0, max_y = 0.0;
             for (auto candidate : candidates) {
@@ -451,13 +501,6 @@ int main(int argc, char **argv) {
 
                 uint8_t intensity = (uint8_t) (candidate.score * 255);
                 theta_to_scores_mat[theta].at<Vec3b>(image_size - j - 1, i) = colorMap(intensity, palette_str);
-
-                if (candidate.x == max_x && candidate.y == 0.0) {
-                    theta_to_scores_mat[theta].at<Vec3b>(image_size - j - 1, i) = Vec3b(0, 0, 255);  // red: x axis
-                }
-                if (candidate.y == max_y && candidate.x == 0.0) {
-                    theta_to_scores_mat[theta].at<Vec3b>(image_size - j - 1, i) = Vec3b(0, 255, 255);  // yellow: y axis
-                }
             }
 
             // Make image of the probability grid
@@ -478,16 +521,13 @@ int main(int argc, char **argv) {
             Mat cov_mat = (Mat_<double>(2, 2) << covariance(0, 0) / grid_->limits().resolution(), covariance(0, 1) / grid_->limits().resolution(), covariance(1, 0) / grid_->limits().resolution(), covariance(1, 1) / grid_->limits().resolution());
 
             // The mean of our data
-            Point2f mean(probability_grid_mat_w / 2, probability_grid_mat_h / 2);  // TODO: maybe switch x, y
+            Point2f mean(probability_grid_mat_w / 2, probability_grid_mat_h / 2);
 
             // Calculate the error ellipse for a 95% confidence interval
-            RotatedRect confidence_interval_ellipse = getErrorEllipse(2.4477, mean, cov_mat);
+            RotatedRect confidence_interval_ellipse = getErrorEllipse(2.4477, mean, cov_mat * 50);
 
-            // Show the result
-            //        Mat visualize_image(240, 320, CV_8UC1, Scalar::all(0));
-            ellipse(probability_grid_mat, confidence_interval_ellipse, Scalar::all(255), 1);
-            //        imshow("EllipseDemo", visualize_image);
-            //        waitKey();
+            // draw the result in probability_grid_mat
+            ellipse(probability_grid_mat, confidence_interval_ellipse, Vec3b(0, 255, 255), 1);
 
             auto make_images_t_end = chrono::high_resolution_clock::now();
             double make_images_elapsed_time_ms = chrono::duration<double, milli>(make_images_t_end - make_images_t_start).count();
@@ -496,51 +536,15 @@ int main(int argc, char **argv) {
             // Save images of the score
             auto save_images_t_start = chrono::high_resolution_clock::now();
             vector<Mat> tiled_scores_mat_vec;
-            //        int image_theta_count = 0;
             for (auto const &theta_scores_mat : theta_to_scores_mat) {
                 Mat scores_mat_with_border = Mat(theta_scores_mat.second.rows + 2, theta_scores_mat.second.cols + 2, CV_8UC3);
                 scores_mat_with_border(cv::Rect_<int>(0, 0, scores_mat_with_border.cols, scores_mat_with_border.rows)) = Vec3b(20, 20, 20);
                 theta_scores_mat.second.copyTo(scores_mat_with_border(cv::Rect_<int>(1, 1, theta_scores_mat.second.cols, theta_scores_mat.second.rows)));
                 tiled_scores_mat_vec.push_back(scores_mat_with_border);
-
-                //            cv::resize(scores_mat_with_border, scores_mat_with_border, cv::Size(), 10.0, 10.0, cv::INTER_NEAREST);
-                //            double theta = theta_scores_mat.first;
-                //            ostringstream filename_ss;
-                //            filename_ss << "/home/enrico/tmp/gs/candidates_score_" << image_theta_count++ << "_theta_" << theta << ".png";
-                //            bool result = false;
-                //            try {
-                //                result = imwrite(filename_ss.str(), scores_mat_with_border, compression_params);
-                //            } catch (const cv::Exception &ex) {
-                //                fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
-                //            }
-                //            if (!result) {
-                //                cerr << "Failed to write image" << endl;
-                //            }
             }
 
             Mat tiled_scores_mat;
             cv::hconcat(tiled_scores_mat_vec, tiled_scores_mat);
-            //        try {
-            //            ostringstream filename_tiled_scores_mat_ss;
-            //            filename_tiled_scores_mat_ss << "/home/enrico/tmp/gs/candidates_score_tiled_" << point_cloud_count << ".png";
-            //            imwrite(filename_tiled_scores_mat_ss.str(), tiled_scores_mat, compression_params);
-            //        } catch (const cv::Exception &ex) {
-            //            fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
-            //        }
-            //
-            //        // Save image of the probability grid
-            //        ostringstream probability_grid_filename_ss;
-            //        probability_grid_filename_ss << "/home/enrico/tmp/gs/probability_grid_" << point_cloud_count << ".png";
-            //        bool probability_grid_result = false;
-            //        try {
-            //            probability_grid_result = imwrite(probability_grid_filename_ss.str(), probability_grid_mat, compression_params);
-            //        } catch (const cv::Exception &ex) {
-            //            fprintf(stderr, "Exception converting image to PNG format: %s\n", ex.what());
-            //        }
-            //        if (!probability_grid_result) {
-            //            cerr << "Failed to write image" << endl;
-            //        }
-
             cv::resize(tiled_scores_mat, tiled_scores_mat, cv::Size(), 3, 3, cv::INTER_NEAREST);
 
             Mat tiled_all_mat = Mat(probability_grid_mat.rows + tiled_scores_mat.rows, max(probability_grid_mat.cols, tiled_scores_mat.cols), CV_8UC3);
@@ -595,14 +599,5 @@ int main(int argc, char **argv) {
 
     // make video from tiled images with `ffmpeg -r 10 -i tiled_all_%05d.png -vcodec libx265 -crf 10 out.mp4`
 
-    // TODO: compute
-    //  - grid from scan_gt
-    //  - keep translation/rotation_delta_cost_weight?
-    //  - manually set linear and rotation step
-    //  - covariance
-    //  - covariance sum or something to get an overall measure of similarity (max axis for translation?)
-    //  - eigen vectors
-    //  - translation_covariance_axis·direction_of_translation
-    //  - rotation_covariance·rotation
     return 0;
 }

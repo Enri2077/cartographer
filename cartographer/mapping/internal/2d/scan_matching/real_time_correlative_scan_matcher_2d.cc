@@ -120,9 +120,10 @@ std::vector<Candidate2D> RealTimeCorrelativeScanMatcher2D::ComputeCovariance(con
     Eigen::Matrix3d K = Eigen::Matrix3d::Zero();
     double s = 0.0;
 
-    for (auto candidate : candidates) {
+    for (auto &candidate : candidates) {
         Eigen::Vector3d x(candidate.x, candidate.y, candidate.orientation);
-        double p = (candidate.score - min_score)/(1-min_score);
+        candidate.score = (candidate.score - min_score)/(1-min_score);
+        double p = candidate.score;
         K += x * x.transpose() * p;
         s += p;
     }
